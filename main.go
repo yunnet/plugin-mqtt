@@ -1,18 +1,17 @@
 package plugin_mqtt
 
 import (
+	"context"
 	"fmt"
 	. "github.com/Monibuca/engine/v3"
-	. "github.com/Monibuca/utils/v3"
+
 	"github.com/goiiot/libmqtt"
 	"github.com/tidwall/gjson"
 	"io/ioutil"
 	"log"
-	"os"
 	"os/exec"
 	"time"
 )
-
 
 /**
 功能：
@@ -20,22 +19,32 @@ import (
  2、接收到开始推流指令后，执行ffmpeg
  3、切换数据源指令：(1)摄像头数据流 (2)算法数据流
  4、接收到停止推流指令后，停止ffmpeg
+
+【开始推流】
+指令：{"command": "start"}
+
+【停止推流】
+指令：{"command": "stop"}
+
+【切换推流】
+指令：{"command": "switch", "enabled": false}
+
 */
 
 var config struct {
- Host string
- Username string
- Password string
- ClientId string
- SourceUrl string
- TargetUrl string
+	Host      string
+	Username  string
+	Password  string
+	ClientId  string
+	SourceUrl string
+	TargetUrl string
 }
 
-var(
-	client libmqtt.Client
-	options []libmqtt.Option
+var (
+	client    libmqtt.Client
+	options   []libmqtt.Option
 	switchUrl string
-	err    error
+	err       error
 )
 
 const C_PID_FILE = "gonne.lock"
@@ -48,11 +57,24 @@ func init() {
 	})
 }
 
-func run() {
-	defer log.Println(config.Host + " mqtt start!")
+func run(ctx context.Context) {
+	c, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func(ctx context.Context) {
+		for{
+			select {
+			case <-ctx.Done():
+				fmt.Println("收到信号，父context的协程退出,time=", time.Now().Unix())
+				destroy()
+				return
+			default:
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}(c)
 
 	switchUrl = config.SourceUrl
-
 	client, err = libmqtt.NewClient(
 		// try MQTT 5.0 and fallback to MQTT 3.1.1
 		libmqtt.WithVersion(libmqtt.V311, true),
@@ -94,11 +116,15 @@ func run() {
 
 	// connect tcp server
 	err = client.ConnectServer(config.Host, options...)
-	if err != nil{
+	if err != nil {
 		log.Printf("connect to server failed: %v", err)
 	}
 
 	client.Wait()
+}
+
+func destroy() {
+	CloseFFmpeg()
 }
 
 func connHandler(client libmqtt.Client, server string, code byte, err error) {
@@ -116,7 +142,7 @@ func connHandler(client libmqtt.Client, server string, code byte, err error) {
 	go func() {
 		// subscribe to some topics
 		client.Subscribe([]*libmqtt.Topic{
-			{Name: "/device/" +config.ClientId + "/#", Qos: libmqtt.Qos0},
+			{Name: "/device/" + config.ClientId + "/#", Qos: libmqtt.Qos0},
 		}...)
 	}()
 }
@@ -173,34 +199,39 @@ func handleData(topic, msg string) {
 	log.Println(commandNode.Value())
 
 	switch commandNode.String() {
-	case "start": openFFmpeg(switchUrl)
-	case "stop": closeFFmpeg()
-	case "switch": {
-		enabled := rootJson.Get("enabled")
-		switchFFmpeg(enabled.Bool())
-	}
+	case "start":
+		openFFmpeg(switchUrl)
+	case "stop":
+		CloseFFmpeg()
+	case "switch":
+		{
+			enabled := rootJson.Get("enabled")
+			switchFFmpeg(enabled.Bool())
+		}
 	default:
 		log.Printf("command error %s", commandNode.String())
 	}
 }
 
 func switchFFmpeg(enabled bool) {
-	closeFFmpeg()
+	CloseFFmpeg()
 
-	if enabled{
+	if enabled {
 		switchUrl = config.SourceUrl
-	}else{
+	} else {
 		switchUrl = "rtsp://127.0.0.1/live/hw"
 	}
 	openFFmpeg(switchUrl)
 }
 
 func openFFmpeg(url string) {
-	if url == ""{
+	CloseFFmpeg()
+
+	if url == "" {
 		log.Println("url is null")
 		return
 	}
-	if Exist(C_PID_FILE){
+	if Exist(C_PID_FILE) {
 		log.Println("ffmpeg already run.")
 		return
 	}
@@ -208,7 +239,7 @@ func openFFmpeg(url string) {
 	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", url, "-vcodec", "copy", "-acodec", "aac", "-ar", "44100", "-f", "flv", config.TargetUrl)
 	log.Println(" => " + cmd.String())
 	err := cmd.Start()
-	if err != nil{
+	if err != nil {
 		log.Println("cmd start", err)
 	}
 
@@ -216,37 +247,13 @@ func openFFmpeg(url string) {
 	log.Println("Pid ", pid)
 
 	err = ioutil.WriteFile(C_PID_FILE, []byte(fmt.Sprintf("%d", pid)), 0666)
-	if err != nil{
+	if err != nil {
 		log.Println("cmd write pid file fail. ", err)
 	}
 
 	err = cmd.Wait()
-	if err != nil{
+	if err != nil {
 		log.Println("cmd wait", err)
 	}
 }
 
-func closeFFmpeg(){
-	if !Exist(C_PID_FILE){
-		log.Println("gonne.lock file not exists.")
-		return
-	}
-	pid, _ := ioutil.ReadFile(C_PID_FILE)
-
-	cmd := exec.Command("kill", "-9", string(pid))
-	log.Println(" => " + cmd.String())
-
-	err := cmd.Start()
-	if err != nil{
-		log.Println("cmd start", err)
-	}
-	err = cmd.Wait()
-	if err != nil{
-		log.Println("cmd wait", err)
-	}
-
-	err = os.Remove(C_PID_FILE)
-	if err != nil{
-		log.Println("cmd remove " + C_PID_FILE, err)
-	}
-}

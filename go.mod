@@ -1,6 +1,10 @@
 module github.com/yunnet/plugin-mqtt
 
-go 1.16
+go 1.17
+
+replace (
+	github.com/Monibuca/engine/v3 v3.3.1 => ../engine
+)
 
 require (
 	github.com/Monibuca/engine/v3 v3.3.1
