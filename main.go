@@ -56,9 +56,10 @@ var config struct {
 	Password  string
 	ClientId  string
 	SourceUrl string
+	AlgUrl    string // 算法源
 	TargetUrl string
 	UploadUrl string
-	SavePath string
+	SavePath  string
 }
 
 var (
@@ -67,8 +68,8 @@ var (
 	switchUrl string
 	err       error
 	topic     string
-	gc         gcache.Cache
-    LOC, _ = time.LoadLocation("Asia/Shanghai")
+	gc        gcache.Cache
+	LOC, _    = time.LoadLocation("Asia/Shanghai")
 )
 
 type RecFileInfo struct {
@@ -104,8 +105,10 @@ func run() {
 	c, cancel := context.WithCancel(Ctx)
 	defer cancel()
 
+	gc = gcache.New(100).LRU().Build()
+
 	go func(ctx context.Context) {
-		for{
+		for {
 			select {
 			case <-ctx.Done():
 				fmt.Println("收到信号，父context的协程退出,time=", time.Now().Unix())
@@ -118,6 +121,7 @@ func run() {
 	}(c)
 
 	switchUrl = config.SourceUrl
+	topic = "/device/" + config.ClientId
 	client, err = libmqtt.NewClient(
 		// try MQTT 5.0 and fallback to MQTT 3.1.1
 		libmqtt.WithVersion(libmqtt.V311, true),
@@ -185,7 +189,7 @@ func connHandler(client libmqtt.Client, server string, code byte, err error) {
 	go func() {
 		// subscribe to some topics
 		client.Subscribe([]*libmqtt.Topic{
-			{Name: "/device/" + config.ClientId + "/#", Qos: libmqtt.Qos0},
+			{Name: topic + "/#", Qos: libmqtt.Qos0},
 		}...)
 	}()
 }
@@ -274,14 +278,14 @@ func getRecordFiles(client libmqtt.Client, data string) {
 	endStr := endNode.Str
 
 	var begin, end time.Time
-	begin, err = StrToDatetime(beginStr)
+	begin, err = strToDatetime(beginStr)
 	if err != nil {
 		payload := "开始日期错误 " + err.Error()
 		publish(client, payload)
 		return
 	}
 
-	end, err = StrToDatetime(endStr)
+	end, err = strToDatetime(endStr)
 	if err != nil {
 		payload := "开始日期错误 " + err.Error()
 		publish(client, payload)
@@ -387,7 +391,7 @@ func switchFFmpeg(enabled bool) {
 	if enabled {
 		switchUrl = config.SourceUrl
 	} else {
-		switchUrl = "rtsp://127.0.0.1/live/hw"
+		switchUrl = config.AlgUrl
 	}
 	openFFmpeg(switchUrl)
 }
@@ -423,10 +427,6 @@ func openFFmpeg(url string) {
 	if err != nil {
 		log.Println("cmd wait", err)
 	}
-}
-
-func StrToDatetime(t string) (time.Time, error) {
-	return time.ParseInLocation("2006-01-02 15:04:05", t, LOC)
 }
 
 func getRecFileRange(dstPath string, begin, end *time.Time) (recFile *RecFileInfo, err error) {
@@ -502,6 +502,10 @@ func getDuration(file FileWr) uint32 {
 		}
 	}
 	return 0
+}
+
+func strToDatetime(t string) (time.Time, error) {
+	return time.ParseInLocation("2006-01-02 15:04:05", t, LOC)
 }
 
 //live/hk/2021/09/24/143046.flv
