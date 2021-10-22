@@ -33,6 +33,7 @@ import (
  3、切换数据源指令：(1)摄像头数据流 (2)算法数据流q:
  4、接收到停止推流指令后，停止ffmpeg
 
+topic: /device/xxxxx/cmd
 【开始推流】
 指令：{"command": "start"}
 
@@ -43,7 +44,7 @@ import (
 指令：{"command": "switch", "enabled": false}
 
 【请求录像列表】
-指令：{"command": "record", "begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
+指令：{"requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command": "recordList", "begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
 
 【请求上传文件】
 指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
@@ -122,6 +123,7 @@ func run() {
 
 	switchUrl = config.SourceUrl
 	topic = "/device/" + config.ClientId
+	
 	client, err = libmqtt.NewClient(
 		// try MQTT 5.0 and fallback to MQTT 3.1.1
 		libmqtt.WithVersion(libmqtt.V311, true),
@@ -189,7 +191,7 @@ func connHandler(client libmqtt.Client, server string, code byte, err error) {
 	go func() {
 		// subscribe to some topics
 		client.Subscribe([]*libmqtt.Topic{
-			{Name: topic + "/#", Qos: libmqtt.Qos0},
+			{Name: topic + "/cmd/#", Qos: libmqtt.Qos0},
 		}...)
 	}()
 }
@@ -242,21 +244,24 @@ func pubHandler(client libmqtt.Client, topic string, err error) {
 func handleData(client libmqtt.Client, topic, msg string) {
 	log.Printf("recv [%v] message: %v", topic, msg)
 
-	commandNode := gjson.Get(msg, "command")
+	cmd := gjson.Get(msg, "command")
 
-	log.Println(commandNode.Value())
+	log.Println(cmd.Value())
 
-	switch commandNode.String() {
+	switch cmd.String() {
 	case "start":
 		openFFmpeg(switchUrl)
+
 	case "stop":
 		CloseFFmpeg()
+
 	case "switch":
 		{
 			enabled := gjson.Get(msg, "enabled").Bool()
 			switchFFmpeg(enabled)
 		}
-	case "record":
+
+	case "recordList":
 		getRecordFiles(client, msg)
 
 	case "upload":
@@ -264,48 +269,57 @@ func handleData(client libmqtt.Client, topic, msg string) {
 			file := gjson.Get(msg, "file").Str
 			uploadFile(file)
 		}
+
 	default:
-		log.Printf("command error %s", commandNode.String())
+		log.Printf("command error %s", cmd.String())
 	}
 }
 
-//指令：{"command": "record", "begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
+//指令：{"requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command": "recordList", "begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
 func getRecordFiles(client libmqtt.Client, data string) {
-	beginNode := gjson.Get(data, "begin")
-	beginStr := beginNode.Str
+	requestId := gjson.Get(data, "requestId").Str
+	command := gjson.Get(data, "command").Str
+	beginStr := gjson.Get(data, "begin").Str
+	endStr := gjson.Get(data, "end").Str
 
-	endNode := gjson.Get(data, "end")
-	endStr := endNode.Str
+	t := topic + "/record/list"
 
 	var begin, end time.Time
 	begin, err = strToDatetime(beginStr)
 	if err != nil {
-		payload := "开始日期错误 " + err.Error()
-		publish(client, payload)
+		payload := "开始时间错误 " + err.Error()
+		publish(client, t, payload)
 		return
 	}
 
 	end, err = strToDatetime(endStr)
 	if err != nil {
-		payload := "开始日期错误 " + err.Error()
-		publish(client, payload)
+		payload := "结束时间错误 " + err.Error()
+		publish(client, t, payload)
 		return
 	}
 
 	files, err := getRecords(&begin, &end)
 	if err != nil {
 		payload := "获取文件列表错误 " + err.Error()
-		publish(client, payload)
+		publish(client, t, payload)
 		return
 	}
 
-	res, err := json.Marshal(files)
+	var result = make(map[string]interface{}, 4)
+	result["requestId"] = requestId
+	result["command"] = command
+	result["deviceId"] = config.ClientId
+	result["data"] = files
+
+	res, err := json.Marshal(result)
 	if err != nil {
 		payload := "获取文件列表错误 " + err.Error()
-		publish(client, payload)
+		publish(client, t, payload)
 		return
 	}
-	publish(client, string(res))
+
+	publish(client, t, string(res))
 }
 
 func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
@@ -337,11 +351,17 @@ func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
 func uploadFile(file string) {
 	filePath := filepath.Join(config.SavePath, file)
 
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext != ".flv" || ext != ".mp4" {
+		fmt.Println("文件格式不正确: " + filePath)
+		return
+	}
+
 	bodyBuf := &bytes.Buffer{}
 	bodyWriter := multipart.NewWriter(bodyBuf)
 
 	//关键的一步操作
-	fileWriter, err := bodyWriter.CreateFormFile("uploadfile", filePath)
+	fileWriter, err := bodyWriter.CreateFormFile("video", filePath)
 	if err != nil {
 		fmt.Println("error writing to buffer")
 		return
@@ -367,11 +387,13 @@ func uploadFile(file string) {
 	//POST
 	resp, err := http.Post(config.UploadUrl, contentType, bodyBuf)
 	if err != nil {
+		log.Println(err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
+		log.Println(err.Error())
 		return
 	}
 	fmt.Println(resp.Status)
@@ -379,7 +401,7 @@ func uploadFile(file string) {
 	return
 }
 
-func publish(client libmqtt.Client, payload string) {
+func publish(client libmqtt.Client, topic, payload string) {
 	client.Publish([]*libmqtt.PublishPacket{
 		{TopicName: topic, Payload: []byte(payload), Qos: libmqtt.Qos0},
 	}...)
