@@ -49,6 +49,7 @@ topic: /device/xxxxx/cmd
 【请求上传文件】
 指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
 
+注：发现emqx会保留最近会话，更改主题时，请清除emqx中的会话记录
 */
 
 var config struct {
@@ -245,8 +246,7 @@ func handleData(client libmqtt.Client, topic, msg string) {
 	log.Printf("recv [%v] message: %v", topic, msg)
 
 	cmd := gjson.Get(msg, "command")
-
-	log.Println(cmd.Value())
+	log.Printf("recv command [%s]: %s\n", topic, cmd.Value())
 
 	switch cmd.String() {
 	case "start":
@@ -265,10 +265,7 @@ func handleData(client libmqtt.Client, topic, msg string) {
 		getRecordFiles(client, msg)
 
 	case "upload":
-		{
-			file := gjson.Get(msg, "file").Str
-			uploadFile(file)
-		}
+		uploadFile(msg)
 
 	default:
 		log.Printf("command error %s", cmd.String())
@@ -331,8 +328,6 @@ func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
 		if ext == ".flv" || ext == ".mp4" {
 			t := time.Now()
 			if f, err := getRecFileRange(filePath, begin, end); err == nil && f != nil {
-				log.Printf("append file" + f.Url)
-
 				files = append(files, f)
 			}
 			spend := time.Since(t).Seconds()
@@ -348,11 +343,14 @@ func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
 }
 
 //指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
-func uploadFile(file string) {
+func uploadFile(msg string) {
+	requestId := gjson.Get(msg, "requestId").Str
+	file := gjson.Get(msg, "file").Str
+
 	filePath := filepath.Join(config.SavePath, file)
 
 	ext := strings.ToLower(filepath.Ext(filePath))
-	if ext != ".flv" || ext != ".mp4" {
+	if ext != ".mp4" {
 		fmt.Println("文件格式不正确: " + filePath)
 		return
 	}
@@ -381,8 +379,14 @@ func uploadFile(file string) {
 		return
 	}
 
+	info := fmt.Sprintf(`{"requestId": "%s", "deviceId": "%s", "file": "%s"}`, requestId, config.ClientId, file)
+	_ = bodyWriter.WriteField("info", info)
 	contentType := bodyWriter.FormDataContentType()
-	bodyWriter.Close()
+	err = bodyWriter.Close()
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
 
 	//POST
 	resp, err := http.Post(config.UploadUrl, contentType, bodyBuf)
@@ -391,6 +395,7 @@ func uploadFile(file string) {
 		return
 	}
 	defer resp.Body.Close()
+
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		log.Println(err.Error())
