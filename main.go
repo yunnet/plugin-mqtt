@@ -33,18 +33,27 @@ import (
  3、切换数据源指令：(1)摄像头数据流 (2)算法数据流q:
  4、接收到停止推流指令后，停止ffmpeg
 
+指令主题
 topic: /device/xxxxx/cmd
+
 【开始推流】
-指令：{"command": "start"}
+指令：{"command": "start","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e"}
+回复：
+topic: /device/xxxxx/record/push
+content: {"command": "pushStream", "requestId":"", "result": "ok", "type":1}
 
 【停止推流】
-指令：{"command": "stop"}
+指令：{"command": "stop","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e"}
 
 【切换推流】
-指令：{"command": "switch", "enabled": false}
+指令：{"command": "switch", ,"requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "enabled": false}
 
 【请求录像列表】
-指令：{"requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command": "recordList", "begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
+指令：{"command": "recordList","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","begin": "2021-10-11 00:00:00", "end": "2021-10-11 23:59:59"}
+回复：
+topic: /device/xxxxx/record/list
+content:
+{"deviceId":"13570309659","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command":"recordList","data":[{"url":"live/hw/2021-10-25/08-31-18.mp4","size":187366179,"timestamp":1635121878,"duration":301},{"url":"live/hw/2021-10-25/08-36-19.mp4","size":225607892,"timestamp":1635122179,"duration":302},{"url":"live/hw/2021-10-25/08-41-21.mp4","size":202025529,"timestamp":1635122481,"duration":302}]}
 
 【请求上传文件】
 指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
@@ -93,7 +102,7 @@ func (c *RecFileInfo) String() string {
 	return string(res)
 }
 
-const C_PID_FILE = "pull.lock"
+const C_PID_FILE = "ff.lock"
 
 func init() {
 	InstallPlugin(&PluginConfig{
@@ -124,7 +133,7 @@ func run() {
 
 	switchUrl = config.SourceUrl
 	topic = "/device/" + config.ClientId
-	
+
 	client, err = libmqtt.NewClient(
 		// try MQTT 5.0 and fallback to MQTT 3.1.1
 		libmqtt.WithVersion(libmqtt.V311, true),
@@ -250,16 +259,16 @@ func handleData(client libmqtt.Client, topic, msg string) {
 
 	switch cmd.String() {
 	case "start":
-		openFFmpeg(switchUrl)
+		{
+			requestId := gjson.Get(msg, "requestId").Str
+			openFFmpeg(client, requestId, 0)
+		}
 
 	case "stop":
 		CloseFFmpeg()
 
 	case "switch":
-		{
-			enabled := gjson.Get(msg, "enabled").Bool()
-			switchFFmpeg(enabled)
-		}
+		switchFFmpeg(client, msg)
 
 	case "recordList":
 		getRecordFiles(client, msg)
@@ -412,20 +421,27 @@ func publish(client libmqtt.Client, topic, payload string) {
 	}...)
 }
 
-func switchFFmpeg(enabled bool) {
+func switchFFmpeg(client libmqtt.Client, msg string) {
 	CloseFFmpeg()
 
+	requestId := gjson.Get(msg, "requestId").Str
+	enabled := gjson.Get(msg, "enabled").Bool()
+	var kind = 0
 	if enabled {
 		switchUrl = config.SourceUrl
+		kind = 0
 	} else {
 		switchUrl = config.AlgUrl
+		kind = 1
 	}
-	openFFmpeg(switchUrl)
+
+	openFFmpeg(client, requestId, kind)
 }
 
-func openFFmpeg(url string) {
+func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 	CloseFFmpeg()
 
+	url := switchUrl
 	if url == "" {
 		log.Println("url is null")
 		return
@@ -439,7 +455,8 @@ func openFFmpeg(url string) {
 	log.Println(" => " + cmd.String())
 	err := cmd.Start()
 	if err != nil {
-		log.Println("cmd start", err)
+		log.Println("cmd start error ", err)
+		return
 	}
 
 	pid := cmd.Process.Pid
@@ -448,11 +465,28 @@ func openFFmpeg(url string) {
 	err = ioutil.WriteFile(C_PID_FILE, []byte(fmt.Sprintf("%d", pid)), 0666)
 	if err != nil {
 		log.Println("cmd write pid file fail. ", err)
+		return
 	}
+
+	t := topic + "/record/push"
+	var result = make(map[string]interface{}, 3)
+	result["requestId"] = requestId
+	result["result"] = "ok"
+	result["command"] = "pushStream"
+	result["type"] = kind
+
+	res, err := json.Marshal(result)
+	if err != nil {
+		payload := "push stream fail. " + err.Error()
+		publish(client, t, payload)
+		return
+	}
+	publish(client, t, string(res))
 
 	err = cmd.Wait()
 	if err != nil {
 		log.Println("cmd wait", err)
+		return
 	}
 }
 
