@@ -252,12 +252,10 @@ func pubHandler(client libmqtt.Client, topic string, err error) {
 }
 
 func handleData(client libmqtt.Client, topic, msg string) {
-	log.Printf("recv [%v] message: %v", topic, msg)
+	cmd := gjson.Get(msg, "command").Str
+	log.Printf("recv command [%s]: %s\n", topic, cmd)
 
-	cmd := gjson.Get(msg, "command")
-	log.Printf("recv command [%s]: %s\n", topic, cmd.Value())
-
-	switch cmd.String() {
+	switch cmd {
 	case "start":
 		{
 			requestId := gjson.Get(msg, "requestId").Str
@@ -277,7 +275,7 @@ func handleData(client libmqtt.Client, topic, msg string) {
 		uploadFile(msg)
 
 	default:
-		log.Printf("command error %s", cmd.String())
+		log.Printf("command error %s", cmd)
 	}
 }
 

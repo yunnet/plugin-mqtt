@@ -12,11 +12,11 @@ import (
 )
 
 func CloseFFmpeg() {
-	log.Println(":::::::::::::close FFmpeg.")
 	if !Exist(C_PID_FILE) {
 		log.Println("gonne.lock file not exists.")
 		return
 	}
+	log.Println(":::::::::::::close FFmpeg.")
 	s, _ := ioutil.ReadFile(C_PID_FILE)
 	pid := string(s)
 

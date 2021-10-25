@@ -11,13 +11,12 @@ import (
 	"os/exec"
 )
 
-
 func CloseFFmpeg() {
-	log.Println(":::::::::::::close FFmpeg.")
 	if !Exist(C_PID_FILE) {
 		log.Println("gonne.lock file not exists.")
 		return
 	}
+	log.Println(":::::::::::::close FFmpeg.")
 	pid, _ := ioutil.ReadFile(C_PID_FILE)
 
 	cmd := exec.Command("kill", "-9", string(pid))
