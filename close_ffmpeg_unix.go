@@ -35,4 +35,5 @@ func CloseFFmpeg() {
 	if err != nil {
 		log.Println("cmd remove "+C_PID_FILE, err)
 	}
+	status = 0
 }

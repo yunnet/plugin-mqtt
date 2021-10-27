@@ -56,7 +56,7 @@ content:
 {"deviceId":"13570309659","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command":"recordList","data":[{"url":"live/hw/2021-10-25/08-31-18.mp4","size":187366179,"timestamp":1635121878,"duration":301},{"url":"live/hw/2021-10-25/08-36-19.mp4","size":225607892,"timestamp":1635122179,"duration":302},{"url":"live/hw/2021-10-25/08-41-21.mp4","size":202025529,"timestamp":1635122481,"duration":302}]}
 
 【请求上传文件】
-指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
+指令：{"command": "upload","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
 
 注：发现emqx会保留最近会话，更改主题时，请清除emqx中的会话记录
 */
@@ -81,6 +81,7 @@ var (
 	topic     string
 	gc        gcache.Cache
 	LOC, _    = time.LoadLocation("Asia/Shanghai")
+	status    int //0 未运行, 1 正在运行
 )
 
 type RecFileInfo struct {
@@ -131,6 +132,7 @@ func run() {
 		}
 	}(c)
 
+	status = 0
 	switchUrl = config.SourceUrl
 	topic = "/device/" + config.ClientId
 
@@ -349,8 +351,8 @@ func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
 	return
 }
 
-//指令：{"command": "upload", "file": "live/hw/2021-10-09/15-38-05.mp4"}
-func uploadFile(msg string) {
+//指令：{"command": "upload", "requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
+func uploadFile2(msg string) {
 	requestId := gjson.Get(msg, "requestId").Str
 	file := gjson.Get(msg, "file").Str
 
@@ -387,6 +389,8 @@ func uploadFile(msg string) {
 	}
 
 	info := fmt.Sprintf(`{"requestId": "%s", "deviceId": "%s", "file": "%s"}`, requestId, config.ClientId, file)
+	log.Println("update file info: " + info)
+
 	_ = bodyWriter.WriteField("info", info)
 	contentType := bodyWriter.FormDataContentType()
 	err = bodyWriter.Close()
@@ -410,6 +414,62 @@ func uploadFile(msg string) {
 	}
 	fmt.Println(resp.Status)
 	fmt.Println(string(respBody))
+	return
+}
+
+//指令：{"command": "upload", "requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
+func uploadFile(msg string) {
+	requestId := gjson.Get(msg, "requestId").Str
+	file := gjson.Get(msg, "file").Str
+
+	filePath := filepath.Join(config.SavePath, file)
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext != ".mp4" {
+		fmt.Println("文件格式不正确: " + filePath)
+		return
+	}
+
+	r, w := io.Pipe()
+	m := multipart.NewWriter(w)
+	go func() {
+		defer w.Close()
+		defer m.Close()
+
+		part, err := m.CreateFormFile("video", filePath)
+		if err != nil {
+			return
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(part, f); err != nil {
+			return
+		}
+
+		info := fmt.Sprintf(`{"requestId": "%s", "deviceId": "%s", "file": "%s"}`, requestId, config.ClientId, file)
+		log.Println("update file info: " + info)
+
+		_ = m.WriteField("info", info)
+	}()
+
+	//POST
+	resp, err := http.Post(config.UploadUrl, m.FormDataContentType(), r)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	fmt.Printf("[%s] %s \n", resp.Status, string(respBody))
 	return
 }
 
@@ -437,6 +497,26 @@ func switchFFmpeg(client libmqtt.Client, msg string) {
 }
 
 func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
+	t := topic + "/record/push"
+	var result = make(map[string]interface{}, 3)
+	result["requestId"] = requestId
+	result["result"] = "ok"
+	result["command"] = "pushStream"
+	result["type"] = kind
+
+	if status == 1 {
+		res, err := json.Marshal(result)
+		if err != nil {
+			payload := "push stream fail. " + err.Error()
+			publish(client, t, payload)
+			return
+		}
+		publish(client, t, string(res))
+
+		log.Println("ffmpeg already running.")
+		return
+	}
+
 	CloseFFmpeg()
 
 	url := switchUrl
@@ -466,13 +546,6 @@ func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 		return
 	}
 
-	t := topic + "/record/push"
-	var result = make(map[string]interface{}, 3)
-	result["requestId"] = requestId
-	result["result"] = "ok"
-	result["command"] = "pushStream"
-	result["type"] = kind
-
 	res, err := json.Marshal(result)
 	if err != nil {
 		payload := "push stream fail. " + err.Error()
@@ -480,6 +553,8 @@ func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 		return
 	}
 	publish(client, t, string(res))
+
+	status = 1
 
 	err = cmd.Wait()
 	if err != nil {
