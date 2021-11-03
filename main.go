@@ -1,7 +1,6 @@
 package plugin_mqtt
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	. "github.com/Monibuca/engine/v3"
 	. "github.com/Monibuca/utils/v3"
 	"github.com/Monibuca/utils/v3/codec"
+	. "github.com/logrusorgru/aurora"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -62,15 +62,13 @@ content:
 */
 
 var config struct {
-	Host      string
-	Username  string
-	Password  string
-	ClientId  string
-	SourceUrl string
-	AlgUrl    string // 算法源
-	TargetUrl string
-	UploadUrl string
-	SavePath  string
+	Path     string //firefly配置文件路径
+	Enable   bool
+	Host     string //MQTT 地址
+	Username string //MQTT 用户名
+	Password string //MQTT 密码
+	ClientId string //MQTT ID
+	SavePath string //录像视频路径
 }
 
 var (
@@ -81,7 +79,11 @@ var (
 	topic     string
 	gc        gcache.Cache
 	LOC, _    = time.LoadLocation("Asia/Shanghai")
-	status    int //0 未运行, 1 正在运行
+	status    int    //0 未运行, 1 正在运行
+	sourceUrl string //原始视频源
+	algUrl    string //算法视频源
+	targetUrl string //视频推送地址
+	uploadUrl string //上传视频地址
 )
 
 type RecFileInfo struct {
@@ -103,7 +105,10 @@ func (c *RecFileInfo) String() string {
 	return string(res)
 }
 
-const C_PID_FILE = "ff.lock"
+const (
+	C_PID_FILE  = "ff.lock"
+	C_JSON_FILE = "firefly.json"
+)
 
 func init() {
 	InstallPlugin(&PluginConfig{
@@ -113,9 +118,31 @@ func init() {
 	})
 }
 
+func initBoxConfig() {
+	filePath := filepath.Join(config.Path, C_JSON_FILE)
+	content, err := readFile(filePath)
+	if nil != err {
+		log.Printf("read firefly.json error " + err.Error())
+		return
+	}
+	targetUrl = gjson.Get(content, "mqtt.target").Str
+	Print(Green("::::::mqtt.target: "), BrightBlue(targetUrl))
+
+	sourceUrl = gjson.Get(content, "boxinfo.rtsp").Str
+	Print(Green("::::::mqtt.source: "), BrightBlue(sourceUrl))
+
+	algUrl = gjson.Get(content, "mqtt.target").Str
+	Print(Green("::::::mqtt.alg: "), BrightBlue(algUrl))
+
+	uploadUrl = gjson.Get(content, "mqtt.upload").Str
+	Print(Green("::::::mqtt.upload: "), BrightBlue(uploadUrl))
+}
+
 func run() {
 	c, cancel := context.WithCancel(Ctx)
 	defer cancel()
+
+	initBoxConfig()
 
 	gc = gcache.New(100).LRU().Build()
 
@@ -133,7 +160,7 @@ func run() {
 	}(c)
 
 	status = 0
-	switchUrl = config.SourceUrl
+	switchUrl = sourceUrl
 	topic = "/device/" + config.ClientId
 
 	client, err = libmqtt.NewClient(
@@ -176,11 +203,12 @@ func run() {
 	}))
 
 	// connect tcp server
-	err = client.ConnectServer(config.Host, options...)
-	if err != nil {
-		log.Printf("connect to server failed: %v", err)
+	if config.Enable {
+		err = client.ConnectServer(config.Host, options...)
+		if err != nil {
+			log.Printf("connect to server failed: %v", err)
+		}
 	}
-
 	client.Wait()
 }
 
@@ -352,72 +380,6 @@ func getRecords(begin, end *time.Time) (files []*RecFileInfo, err error) {
 }
 
 //指令：{"command": "upload", "requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
-func uploadFile2(msg string) {
-	requestId := gjson.Get(msg, "requestId").Str
-	file := gjson.Get(msg, "file").Str
-
-	filePath := filepath.Join(config.SavePath, file)
-
-	ext := strings.ToLower(filepath.Ext(filePath))
-	if ext != ".mp4" {
-		fmt.Println("文件格式不正确: " + filePath)
-		return
-	}
-
-	bodyBuf := &bytes.Buffer{}
-	bodyWriter := multipart.NewWriter(bodyBuf)
-
-	//关键的一步操作
-	fileWriter, err := bodyWriter.CreateFormFile("video", filePath)
-	if err != nil {
-		fmt.Println("error writing to buffer")
-		return
-	}
-
-	//打开文件句柄操作
-	fh, err := os.Open(filePath)
-	if err != nil {
-		fmt.Println("error opening file")
-		return
-	}
-	defer fh.Close()
-
-	//iocopy
-	_, err = io.Copy(fileWriter, fh)
-	if err != nil {
-		return
-	}
-
-	info := fmt.Sprintf(`{"requestId": "%s", "deviceId": "%s", "file": "%s"}`, requestId, config.ClientId, file)
-	log.Println("update file info: " + info)
-
-	_ = bodyWriter.WriteField("info", info)
-	contentType := bodyWriter.FormDataContentType()
-	err = bodyWriter.Close()
-	if err != nil {
-		log.Println(err.Error())
-		return
-	}
-
-	//POST
-	resp, err := http.Post(config.UploadUrl, contentType, bodyBuf)
-	if err != nil {
-		log.Println(err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Println(err.Error())
-		return
-	}
-	fmt.Println(resp.Status)
-	fmt.Println(string(respBody))
-	return
-}
-
-//指令：{"command": "upload", "requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
 func uploadFile(msg string) {
 	requestId := gjson.Get(msg, "requestId").Str
 	file := gjson.Get(msg, "file").Str
@@ -457,7 +419,7 @@ func uploadFile(msg string) {
 	}()
 
 	//POST
-	resp, err := http.Post(config.UploadUrl, m.FormDataContentType(), r)
+	resp, err := http.Post(uploadUrl, m.FormDataContentType(), r)
 	if err != nil {
 		log.Println(err.Error())
 		return
@@ -486,10 +448,10 @@ func switchFFmpeg(client libmqtt.Client, msg string) {
 	enabled := gjson.Get(msg, "enabled").Bool()
 	var kind = 0
 	if enabled {
-		switchUrl = config.SourceUrl
+		switchUrl = sourceUrl
 		kind = 0
 	} else {
-		switchUrl = config.AlgUrl
+		switchUrl = algUrl
 		kind = 1
 	}
 
@@ -529,7 +491,7 @@ func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 		return
 	}
 
-	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", url, "-vcodec", "copy", "-acodec", "aac", "-ar", "44100", "-f", "flv", config.TargetUrl)
+	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", url, "-vcodec", "copy", "-acodec", "aac", "-ar", "44100", "-f", "flv", targetUrl)
 	log.Println(" => " + cmd.String())
 	err := cmd.Start()
 	if err != nil {
@@ -663,4 +625,12 @@ func getTimestamp(path string, start, end int, layout string) time.Time {
 		return time.Unix(0, 0)
 	}
 	return tmp
+}
+
+func readFile(filePath string) (content string, err error) {
+	res, err := ioutil.ReadFile(filePath)
+	if nil != err {
+		return "", err
+	}
+	return string(res), nil
 }

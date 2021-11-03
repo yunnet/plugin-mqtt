@@ -13,7 +13,7 @@ import (
 
 func CloseFFmpeg() {
 	if !Exist(C_PID_FILE) {
-		log.Println("gonne.lock file not exists.")
+		log.Println(C_PID_FILE + " file not exists.")
 		return
 	}
 	log.Println(":::::::::::::close FFmpeg.")
