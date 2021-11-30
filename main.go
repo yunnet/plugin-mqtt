@@ -53,7 +53,7 @@ content: {"command": "pushStream", "requestId":"", "result": "ok", "type":1}
 回复：
 topic: /device/xxxxx/record/list
 content:
-{"deviceId":"13570309659","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command":"recordList","data":[{"url":"live/hw/2021-10-25/08-31-18.mp4","size":187366179,"timestamp":1635121878,"duration":301},{"url":"live/hw/2021-10-25/08-36-19.mp4","size":225607892,"timestamp":1635122179,"duration":302},{"url":"live/hw/2021-10-25/08-41-21.mp4","size":202025529,"timestamp":1635122481,"duration":302}]}
+{"deviceId":"xxxxx","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e","command":"recordList","data":[{"url":"live/hw/2021-10-25/08-31-18.mp4","size":187366179,"timestamp":1635121878,"duration":301},{"url":"live/hw/2021-10-25/08-36-19.mp4","size":225607892,"timestamp":1635122179,"duration":302},{"url":"live/hw/2021-10-25/08-41-21.mp4","size":202025529,"timestamp":1635122481,"duration":302}]}
 
 【请求上传文件】
 指令：{"command": "upload","requestId":"5627a9fb-f987-4d38-a5d7-e52ca124a42e", "file": "live/hw/2021-10-09/15-38-05.mp4"}
@@ -460,14 +460,14 @@ func switchFFmpeg(client libmqtt.Client, msg string) {
 
 func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 	t := topic + "/record/push"
-	var result = make(map[string]interface{}, 3)
-	result["requestId"] = requestId
-	result["result"] = "ok"
-	result["command"] = "pushStream"
-	result["type"] = kind
+	var replyMap = make(map[string]interface{}, 3)
+	replyMap["requestId"] = requestId
+	replyMap["replyMap"] = "ok"
+	replyMap["command"] = "pushStream"
+	replyMap["type"] = kind
 
 	if status == 1 {
-		res, err := json.Marshal(result)
+		res, err := json.Marshal(replyMap)
 		if err != nil {
 			payload := "push stream fail. " + err.Error()
 			publish(client, t, payload)
@@ -508,7 +508,7 @@ func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 		return
 	}
 
-	res, err := json.Marshal(result)
+	res, err := json.Marshal(replyMap)
 	if err != nil {
 		payload := "push stream fail. " + err.Error()
 		publish(client, t, payload)
