@@ -491,8 +491,10 @@ func openFFmpeg(client libmqtt.Client, requestId string, kind int) {
 		return
 	}
 
-	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", url, "-vcodec", "copy", "-acodec", "aac", "-ar", "44100", "-f", "flv", targetUrl)
+	tarUrl := targetUrl + "/" + config.ClientId
+	cmd := exec.Command("ffmpeg", "-rtsp_transport", "tcp", "-i", url, "-vcodec", "copy", "-acodec", "aac", "-ar", "44100", "-f", "flv", tarUrl)
 	log.Println(" => " + cmd.String())
+
 	err := cmd.Start()
 	if err != nil {
 		log.Println("cmd start error ", err)
